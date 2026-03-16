@@ -1,68 +1,16 @@
-/* Initialize MapLibre + Firebase realtime updates */
+/* Initialize MapLibre */
 maplibregl.accessToken = 'none';
 
 /* Firebase */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
-import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
+import { getDatabase, ref, get } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-database.js";
 
 /* --- Firebase Config --- */
 const firebaseConfig = {
-  databaseURL: "https://test-soilbit-default-rtdb.firebaseio.com/"
+  databaseURL: "https://loraseminar-default-rtdb.firebaseio.com/"
 };
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
-
-/* --- Parameters and Ranges --- */
-const params = [
-  "Temperature", "Moisture", "pH", "Salinity",
-  "EC", "Nitrogen", "Phosphorus", "Potassium"
-];
-
-const ranges = {
-  "pH": [6.00, 6.50],
-  "Moisture": [30.00, 50.00],
-  "Temperature": [18.00, 24.00],
-  "Salinity": [0.50, 2.00],
-  "EC": [0.50, 2.00],
-  "Nitrogen": [80.00, 120.00],
-  "Phosphorus": [20.00, 40.00],
-  "Potassium": [80.00, 120.00]
-};
-
-const messages = {
-  "pH": {
-    low: "Soil pH is too low — acidic soil reduces nutrient availability and stunts growth.",
-    high: "Soil pH is too high — alkaline soil locks nutrients and weakens plants."
-  },
-  "Moisture": {
-    low: "Soil is too dry — roots can’t absorb enough water or nutrients.",
-    high: "Soil is waterlogged — risk of root rot and poor plant health."
-  },
-  "Temperature": {
-    low: "Soil is too cold — growth slows and flowering is delayed.",
-    high: "Soil is too hot — plants are stressed and yield may drop."
-  },
-  "Salinity": {
-    low: "Soil salinity is too low — may cause nutrient imbalance.",
-    high: "Soil salinity is too high — roots are damaged and leaves may burn."
-  },
-  "Nitrogen": {
-    low: "Nitrogen is too low — leaves turn yellow, growth slows.",
-    high: "Nitrogen is too high — excess leaves form, flowering is delayed."
-  },
-  "Phosphorus": {
-    low: "Phosphorus is too low — weak roots and poor flowering.",
-    high: "Phosphorus is too high — micronutrient uptake is blocked, growth suffers."
-  },
-  "Potassium": {
-    low: "Potassium is too low — plants are weak, bean quality drops.",
-    high: "Potassium is too high — calcium and magnesium uptake is disrupted."
-  },
-  "EC": {
-    low: "EC is too low — may cause nutrient imbalance.",
-    high: "EC is too high — roots are damaged and leaves may burn."
-  },
-};
 
 /* --- Username from URL --- */
 const username = new URLSearchParams(window.location.search).get("user");
@@ -71,6 +19,7 @@ if (!username) {
   throw new Error("Username missing");
 }
 
+/* --- Initialize Map --- */
 const map = new maplibregl.Map({
   container: 'map',
   style: {
@@ -82,8 +31,7 @@ const map = new maplibregl.Map({
           `https://api.maptiler.com/maps/satellite/256/{z}/{x}/{y}.jpg?key=k0zBlTOs7WrHcJIfCohH`
         ],
         tileSize: 256,
-        attribution:
-          '<a href="https://www.maptiler.com/" target="_blank">© MapTiler</a> © OpenStreetMap contributors'
+        attribution: '<a href="https://www.maptiler.com/" target="_blank">© MapTiler</a> © OpenStreetMap contributors'
       }
     },
     layers: [
@@ -97,361 +45,587 @@ const map = new maplibregl.Map({
     ]
   },
   center: [0, 0],
-  zoom: 1,
-  bearing: 0,
-  pitch: 0
+  zoom: 2
 });
 
-map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
+/* --- Store markers --- */
 let markers = {};
-let suppressUpdate = false;
+let currentFarmData = null; // Store the latest farm data for refresh functionality
 
-/* --- Firebase Realtime Updates --- */
-map.on("load", () => {
-  const userRef = ref(db, `Users/${username}/Farm/Nodes`);
-  onValue(userRef, (snapshot) => {
-    if (suppressUpdate) return;
-    const data = snapshot.val();
-    if (data) updateMap(data);
-  });
-});
-
-/* --- Update Map --- */
-/* --- Update Map --- */
-function updateMap(data) {
-  const coordsList = [];
-  let activePopupNode = null;
-
-  Object.entries(data).forEach(([nodeName, nodeData]) => {
-    const coords = nodeData.Coordinates;
-    if (!coords || coords.X === undefined || coords.Y === undefined) {
-      console.warn(`${nodeName} skipped: missing coordinates`);
+/* --- Function to load data ONCE (not real-time) --- */
+function loadDataOnce() {
+  console.log("Loading data from Firebase (one-time fetch)...");
+  
+  // Read the farm data from Firebase (one-time fetch, not real-time)
+  const farmRef = ref(db, `Users/${username}/Farm`);
+  
+  get(farmRef).then((snapshot) => {
+    const farmData = snapshot.val();
+    console.log("Firebase data loaded:", farmData);
+    
+    // Store the data
+    currentFarmData = farmData;
+    
+    // Clear existing markers
+    Object.values(markers).forEach(marker => marker.remove());
+    markers = {};
+    
+    if (!farmData) {
+      console.log("No farm data found");
       return;
     }
-    coordsList.push([coords.X, coords.Y]);
-
-    const packets = Object.values(nodeData.Packets || {});
-    const latestPacket = packets.length > 0 ? packets[packets.length - 1] : null;
-
-    if (markers[nodeName]) markers[nodeName].remove();
-
-    // If no packets, marker is grey
-    const markerColor = latestPacket ? "red" : "grey";
-
-    const marker = new maplibregl.Marker({ color: markerColor })
-      .setLngLat([coords.X, coords.Y])
-      .addTo(map);
-
-    const container = document.createElement("div");
-    container.className = "popup-content";
-    container.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
-
-    // Node name
-    const title = document.createElement("h3");
-    title.textContent = nodeName;
-    title.style.textAlign = "center";
-    title.style.marginBottom = "0";
-    container.appendChild(title);
-
-    // Timestamp display
-    // Timestamp display
-// Timestamp display
-const timestampDiv = document.createElement("div");
-timestampDiv.style.textAlign = "center";
-timestampDiv.style.marginBottom = "12px";
-timestampDiv.style.fontSize = "11px";
-timestampDiv.style.color = "#666";
-timestampDiv.style.lineHeight = "1.4";
-
-if (latestPacket) {
-  // Create receive time display (now first - "Read time")
-  const receiveTime = document.createElement("div");
-  receiveTime.style.marginBottom = "4px";
-  
-  if (latestPacket.receive_timestamp) {
-    receiveTime.innerHTML = `<span style="font-weight: 600;">📥 Read time:</span> ${latestPacket.receive_timestamp}`;
-    receiveTime.style.color = "#2c3e50";
-  } else {
-    receiveTime.innerHTML = `<span style="font-weight: 600;">📥 Read time:</span> Not available`;
-    receiveTime.style.fontStyle = "italic";
-    receiveTime.style.color = "#999";
-  }
-  
-  // Create upload time display (now second - "Reflected time")
-  const uploadTime = document.createElement("div");
-  uploadTime.style.marginTop = "4px";
-  uploadTime.style.borderTop = "1px dashed #ccc";
-  uploadTime.style.paddingTop = "4px";
-  
-  if (latestPacket.upload_timestamp) {
-    uploadTime.innerHTML = `<span style="font-weight: 600;">📤 Reflected time:</span> ${latestPacket.upload_timestamp}`;
-  } else if (latestPacket.timestamp) {
-    uploadTime.innerHTML = `<span style="font-weight: 600;">📤 Reflected time:</span> ${latestPacket.timestamp}`;
-  } else {
-    uploadTime.innerHTML = `<span style="font-weight: 600;">📤 Reflected time:</span> Not available`;
-    uploadTime.style.fontStyle = "italic";
-  }
-  
-  timestampDiv.appendChild(receiveTime);
-  timestampDiv.appendChild(uploadTime);
-  
-  // Calculate and show delay if both timestamps exist
-  if (latestPacket.receive_timestamp && (latestPacket.upload_timestamp || latestPacket.timestamp)) {
-    try {
-      const receiveDate = new Date(latestPacket.receive_timestamp.replace(' ', 'T'));
-      const uploadTimestamp = latestPacket.upload_timestamp || latestPacket.timestamp;
-      const uploadDate = new Date(uploadTimestamp.replace(' ', 'T'));
-      
-      if (!isNaN(receiveDate) && !isNaN(uploadDate)) {
-        const delayMs = uploadDate - receiveDate;
-        const delaySec = (delayMs / 1000).toFixed(1);
-        
-        const delayDiv = document.createElement("div");
-        delayDiv.style.fontSize = "10px";
-        delayDiv.style.marginTop = "6px";
-        delayDiv.style.padding = "2px 4px";
-        delayDiv.style.backgroundColor = delaySec > 10 ? "#fff3cd" : "#d4edda";
-        delayDiv.style.color = delaySec > 10 ? "#856404" : "#155724";
-        delayDiv.style.borderRadius = "3px";
-        delayDiv.style.fontWeight = "500";
-        
-        
-        timestampDiv.appendChild(delayDiv);
-      }
-    } catch (e) {
-      console.log("Could not calculate delay:", e);
-    }
-  }
-  
-  // Add RSSI if available (optional enhancement)
-  if (latestPacket.rssi !== undefined) {
-    const rssiDiv = document.createElement("div");
-    rssiDiv.style.marginTop = "6px";
-    rssiDiv.style.fontSize = "10px";
-    rssiDiv.style.color = latestPacket.rssi < -80 ? "#dc3545" : "#28a745";
-    rssiDiv.style.padding = "2px 4px";
-    rssiDiv.style.backgroundColor = "#f8f9fa";
-    rssiDiv.style.borderRadius = "3px";
-
-    timestampDiv.appendChild(rssiDiv);
-  }
-  
-} else {
-  timestampDiv.textContent = "No data available yet";
-  timestampDiv.style.fontStyle = "italic";
-  timestampDiv.style.padding = "8px";
-}
-
-container.appendChild(timestampDiv);
-
-    if (!latestPacket) {
-      // No data yet - only show message if timestamp is also not available
-      if (!latestPacket || !latestPacket.timestamp) {
-        const noData = document.createElement("p");
-        noData.textContent = "No data available yet.";
-        noData.style.textAlign = "center";
-        container.appendChild(noData);
-      }
-    } else {
-      // Existing code for parameters and bars
-      params.forEach((param, i) => {
-        const row = document.createElement("div");
-        row.className = `param-row ${i >= 4 ? "extra hidden" : ""}`;
-
-        const label = document.createElement("span");
-        label.textContent = param;
-        label.className = "param-label";
-
-        const value = parseFloat(latestPacket[param.toLowerCase()]) || 0;
-        const [min, max] = ranges[param] || [0, 100];
-        let percent = 0;
-
-        if (param === "pH") percent = ((value - 3) / (9 - 3)) * 100;
-        else if (param === "Moisture") percent = value;
-        else if (param === "Temperature") percent = ((value - (-30)) / (70 - (-30))) * 100;
-        else percent =
-          (Math.log10(Math.max(value, 0.01)) - Math.log10(0.01)) /
-          (Math.log10(20) - Math.log10(0.01)) * 100;
-
-        const barContainer = document.createElement("div");
-        barContainer.className = "bar-container";
-        const bar = document.createElement("div");
-        bar.className = "bar";
-        bar.style.width = Math.min(Math.max(percent, 0), 100) + "%";
-        const inRange = value >= min && value <= max;
-        bar.style.background = inRange ? "darkgreen" : "red";
-
-        const barLines = document.createElement("div");
-        barLines.className = "bar-lines";
-        for (let j = 1; j < 10; j++) barLines.appendChild(document.createElement("div"));
-
-        barContainer.append(bar, barLines);
-
-        const info = document.createElement("button");
-        info.textContent = "ℹ️";
-        info.className = "info-btn";
-
-        const disabledFlag = latestPacket[`Disabled_${param}_done`];
-        const shouldDisable = inRange || disabledFlag !== undefined;
-
-        info.disabled = shouldDisable;
-        info.style.opacity = shouldDisable ? "0.3" : "1.0";
-        info.style.cursor = shouldDisable ? "not-allowed" : "pointer";
-
-        // Click advisory handler
-        info.onclick = () => {
-          if (info.disabled) return;
-
-          const globalAdvisory = document.getElementById("global-advisory");
-          const popupEl = document.querySelector(".maplibregl-popup-content");
-
-          if (
-            globalAdvisory.dataset.activeNode === nodeName &&
-            globalAdvisory.dataset.activeParam === param
-          ) {
-            globalAdvisory.style.display = "none";
-            globalAdvisory.dataset.activeNode = "";
-            globalAdvisory.dataset.activeParam = "";
-            return;
-          }
-
-          const message = value < min ? messages[param].low : messages[param].high;
-          globalAdvisory.innerHTML = `
-            <p class="advisory-text">${message}</p>
-            <button id="doneBtn" class="done-btn">Done</button>
-            <p class="note-text">
-              Note: For parameters like NPK, EC, and pH, changes may take time or days to appear.
-              If an action is performed, please wait before checking results.
-            </p>
-          `;
-          globalAdvisory.style.display = "block";
-          globalAdvisory.dataset.activeNode = nodeName;
-          globalAdvisory.dataset.activeParam = param;
-
-          function updateAdvisoryPosition() {
-            const popup = document.querySelector(".maplibregl-popup-content");
-            if (popup && globalAdvisory.style.display === "block") {
-              const rect = popup.getBoundingClientRect();
-              globalAdvisory.style.top = `${rect.bottom + window.scrollY + 8}px`;
-              globalAdvisory.style.left = `${
-                rect.left + window.scrollX + rect.width / 2 - globalAdvisory.offsetWidth / 2
-              }px`;
-            }
-          }
-          updateAdvisoryPosition();
-          map.on("move", updateAdvisoryPosition);
-          map.on("zoom", updateAdvisoryPosition);
-          const popupObserver = new MutationObserver(updateAdvisoryPosition);
-          if (popupEl) popupObserver.observe(popupEl, { childList: true, subtree: true });
-
-          document.getElementById("doneBtn").onclick = async () => {
-            try {
-              suppressUpdate = true;
-              const timeClicked = Date.now();
-              const disabledKey = `Disabled_${param}_done`;
-              const packetKeys = Object.keys(nodeData.Packets || {});
-              if (packetKeys.length === 0) return;
-              const latestKey = packetKeys[packetKeys.length - 1];
-              const disabledPath = `Users/${username}/Farm/Nodes/${nodeName}/Packets/${latestKey}/${disabledKey}`;
-              await set(ref(db, disabledPath), timeClicked);
-              info.disabled = true;
-              info.style.opacity = "0.3";
-              info.style.cursor = "not-allowed";
-              globalAdvisory.style.display = "none";
-              setTimeout(() => (suppressUpdate = false), 2000);
-            } catch (err) {
-              console.error("❌ Error disabling:", err);
-              suppressUpdate = false;
-            }
-          };
-        };
-
-        row.append(label, barContainer, info);
-        container.appendChild(row);
+    
+    // Get all coordinates from nodes
+    const coordinates = [];
+    
+    // First, check if there are farm-level coordinates
+    if (farmData.Coordinates) {
+      coordinates.push({
+        lng: farmData.Coordinates.X,
+        lat: farmData.Coordinates.Y,
+        source: 'farm',
+        name: 'Farm Location'
       });
     }
-
-    // Toggle button
-    const toggleBtn = document.createElement("button");
-    toggleBtn.className = "toggle-btn";
-    toggleBtn.textContent = "⬇️";
-    toggleBtn.onclick = () => {
-      const extras = container.querySelectorAll(".extra");
-      const hidden = extras[0]?.classList.contains("hidden");
-      extras.forEach((e) => e.classList.toggle("hidden", !hidden));
-      toggleBtn.textContent = hidden ? "⬆️" : "⬇️";
-    };
-    container.append(toggleBtn);
-
-    const popup = new maplibregl.Popup({
-      closeButton: true,
-      closeOnClick: false,
-      offset: [15, -15],
-      anchor: "left",
-    }).setDOMContent(container);
-
-    marker.setPopup(popup);
-    markers[nodeName] = marker;
-
-    marker.getElement().addEventListener("click", (e) => {
-      e.stopPropagation();
-
-      if (popup.isOpen()) popup.remove();
-      else {
-        Object.values(markers).forEach(m => {
-          const p = m.getPopup();
-          if (p && p.isOpen()) p.remove();
-        });
-        popup.addTo(map);
-      }
-    });
-
-    popup.on("close", () => {
-      document.getElementById("global-advisory").style.display = "none";
-    });
-  });
-
-  // Zoom to first node
-  // --- Zoom to the country with the most nodes ---
-  if (coordsList.length > 0) {
-    const geocodePromises = coordsList.map(([lng, lat]) =>
-      fetch(`https://api.maptiler.com/geocoding/${lng},${lat}.json?key=k0zBlTOs7WrHcJIfCohH`)
-        .then(res => res.json())
-        .catch(() => null)
-    );
-
-    Promise.all(geocodePromises).then(results => {
-      const countryCount = {};
-      const countryBboxes = {};
-
-      results.forEach(json => {
-        if (!json || !json.features) return;
-        const countryFeature = json.features.find(f => f.place_type.includes("country"));
-        if (!countryFeature) return;
-
-        const country = countryFeature.properties.name;
-        countryCount[country] = (countryCount[country] || 0) + 1;
-
-        // Store bbox for the country if we haven't yet
-        if (!countryBboxes[country] && countryFeature.bbox) {
-          countryBboxes[country] = countryFeature.bbox;
+    
+    // Then check all nodes (each node might have its own coordinates in the future)
+    if (farmData.Nodes) {
+      Object.entries(farmData.Nodes).forEach(([nodeName, nodeData]) => {
+        // If node has its own coordinates, use those
+        if (nodeData.Coordinates) {
+          coordinates.push({
+            lng: nodeData.Coordinates.X,
+            lat: nodeData.Coordinates.Y,
+            source: nodeName,
+            name: nodeName,
+            nodeData: nodeData
+          });
+        } 
+        // Otherwise, if we have farm coordinates, use those for this node too
+        else if (farmData.Coordinates) {
+          coordinates.push({
+            lng: farmData.Coordinates.X,
+            lat: farmData.Coordinates.Y,
+            source: nodeName,
+            name: nodeName,
+            nodeData: nodeData
+          });
         }
       });
+    }
+    
+    console.log(`Found ${coordinates.length} coordinates to plot`);
+    
+    if (coordinates.length === 0) {
+      console.log("No coordinates found");
+      return;
+    }
+    
+    // Add markers for all coordinates with popups
+    coordinates.forEach((coord, index) => {
+      const markerColor = coord.source === 'farm' ? 'blue' : 'red';
+      
+      // Create marker
+      const marker = new maplibregl.Marker({ color: markerColor })
+        .setLngLat([coord.lng, coord.lat])
+        .addTo(map);
+      
+      // Create popup content
+      const popupContent = document.createElement('div');
+      popupContent.className = 'popup-container';
+      
+      // --- TOP: Title with Refresh Button ---
+      const topBar = document.createElement('div');
+      topBar.className = 'popup-top-bar';
+      
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'popup-title';
+      titleDiv.textContent = 'LoRa Seminar Demo';
+      
+      const refreshBtn = document.createElement('button');
+      refreshBtn.className = 'popup-refresh-btn';
+      refreshBtn.innerHTML = '🔄';
+      refreshBtn.title = 'Refresh data';
+      
+      // Refresh functionality - MANUAL REFRESH ONLY
+      refreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        // Show spinning animation
+        refreshBtn.style.animation = 'spin 1s linear';
+        
+        console.log("Manual refresh triggered by user...");
+        
+        // Fetch fresh data from Firebase (one-time)
+        const farmRef = ref(db, `Users/${username}/Farm`);
+        get(farmRef).then((snapshot) => {
+          const freshData = snapshot.val();
+          console.log("Fresh data loaded:", freshData);
+          
+          // Update current data
+          currentFarmData = freshData;
+          
+          // Update the popup content with fresh data
+          updatePopupContent(popupContent, freshData, coord);
+          
+          // Remove spinning animation
+          setTimeout(() => {
+            refreshBtn.style.animation = '';
+          }, 500);
+          
+        }).catch(error => {
+          console.error("Error refreshing data:", error);
+          refreshBtn.style.animation = '';
+        });
+      });
+      
+      topBar.appendChild(titleDiv);
+      topBar.appendChild(refreshBtn);
+      popupContent.appendChild(topBar);
+      
+      // Initial content population
+      updatePopupContent(popupContent, farmData, coord);
+      
+      // Create popup that appears on the side
+      const popup = new maplibregl.Popup({
+        closeButton: false, // Remove the default X button
+        closeOnClick: false,
+        offset: [15, -15],
+        anchor: 'left',
+        className: 'side-popup',
+        maxWidth: '500px'
+      }).setDOMContent(popupContent);
+      
+      // Attach popup to marker
+      marker.setPopup(popup);
+      
+      // Toggle popup on marker click
+      marker.getElement().addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        if (popup.isOpen()) {
+          popup.remove(); // Close if open
+        } else {
+          // Close any other open popups
+          Object.values(markers).forEach(m => {
+            const p = m.getPopup();
+            if (p && p.isOpen()) p.remove();
+          });
+          
+          popup.addTo(map); // Open this one
+        }
+      });
+      
+      // Store marker with a unique key
+      const key = coord.source === 'farm' ? 'farm' : `node-${index}`;
+      markers[key] = marker;
+    });
+    
+    console.log(`${Object.keys(markers).length} markers added with manual refresh buttons!`);
+    
+    // Now find the country with the most coordinates
+    findCountryWithMostNodes(coordinates);
+    
+  }).catch((error) => {
+    console.error("Error loading data from Firebase:", error);
+  });
+}
 
-      // Find country with most nodes
-      const maxCountry = Object.entries(countryCount).reduce((a, b) => (b[1] > a[1] ? b : a), ["", 0])[0];
+/* --- Function to update popup content with fresh data --- */
+function updatePopupContent(popupContent, farmData, coord) {
+  // Clear existing content except the top bar
+  while (popupContent.children.length > 1) {
+    popupContent.removeChild(popupContent.lastChild);
+  }
+  
+  // --- MAIN CONTENT AREA (with left and right columns) ---
+  const mainContent = document.createElement('div');
+  mainContent.className = 'popup-main-content';
+  
+  // LEFT SIDE: Raw per node
+  const leftSide = document.createElement('div');
+  leftSide.className = 'popup-left';
+  leftSide.innerHTML = '<div class="section-header">📨 RAW</div>';
+  
+  const rawContent = document.createElement('div');
+  rawContent.className = 'raw-content';
+  
+  // Add raw messages from all nodes
+  if (farmData && farmData.Nodes) {
+    Object.entries(farmData.Nodes).forEach(([nodeName, nodeData]) => {
+      const packets = Object.values(nodeData.Packets || {});
+      const latestPacket = packets.length > 0 ? packets[packets.length - 1] : null;
+      
+      const nodeRawDiv = document.createElement('div');
+      nodeRawDiv.className = 'node-raw-item';
+      nodeRawDiv.innerHTML = `
+        <strong>${nodeName}:</strong> 
+        <span class="raw-message">${latestPacket?.raw || 'No message yet'}</span>
+      `;
+      rawContent.appendChild(nodeRawDiv);
+    });
+  }
+  
+  leftSide.appendChild(rawContent);
+  
+  // RIGHT SIDE: Read Time and Reflected Time timestamps
+  const rightSide = document.createElement('div');
+  rightSide.className = 'popup-right';
+  rightSide.innerHTML = '<div class="section-header">⏱️ TIMESTAMPS</div>';
+  
+  const timestampsContent = document.createElement('div');
+  timestampsContent.className = 'timestamps-content';
+  
+  // Add timestamps from all nodes with proper naming
+  if (farmData && farmData.Nodes) {
+    Object.entries(farmData.Nodes).forEach(([nodeName, nodeData]) => {
+      const packets = Object.values(nodeData.Packets || {});
+      const latestPacket = packets.length > 0 ? packets[packets.length - 1] : null;
+      
+      if (latestPacket) {
+        const nodeTimeDiv = document.createElement('div');
+        nodeTimeDiv.className = 'node-time-item';
+        nodeTimeDiv.innerHTML = `
+          <strong>${nodeName}</strong><br>
+          <span class="timestamp-receive">📥 Read Time stamp: ${latestPacket.receive_timestamp || 'N/A'}</span><br>
+          <span class="timestamp-upload">📤 Reflected Time stamp: ${latestPacket.upload_timestamp || latestPacket.timestamp || 'N/A'}</span>
+        `;
+        timestampsContent.appendChild(nodeTimeDiv);
+      } else {
+        const nodeTimeDiv = document.createElement('div');
+        nodeTimeDiv.className = 'node-time-item no-data';
+        nodeTimeDiv.innerHTML = `
+          <strong>${nodeName}</strong><br>
+          <span>No data yet</span>
+        `;
+        timestampsContent.appendChild(nodeTimeDiv);
+      }
+    });
+  }
+  
+  rightSide.appendChild(timestampsContent);
+  
+  // Add left and right to main content
+  mainContent.appendChild(leftSide);
+  mainContent.appendChild(rightSide);
+  popupContent.appendChild(mainContent);
+  
+  // --- BOTTOM: Toggle Button ---
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = 'popup-toggle-btn';
+  toggleBtn.textContent = '⬇️'; // Down arrow by default
+  
+  // Create extended content (hidden by default)
+  const extendedContent = document.createElement('div');
+  extendedContent.className = 'popup-extended';
+  extendedContent.style.display = 'none';
+  
+  // Add RSSI and additional info to extended content
+  if (farmData && farmData.Nodes) {
+    Object.entries(farmData.Nodes).forEach(([nodeName, nodeData]) => {
+      const packets = Object.values(nodeData.Packets || {});
+      const latestPacket = packets.length > 0 ? packets[packets.length - 1] : null;
+      
+      const nodeExtendedDiv = document.createElement('div');
+      nodeExtendedDiv.className = 'node-extended-item';
+      nodeExtendedDiv.innerHTML = `
+        <strong>${nodeName} Details:</strong><br>
+        📶 RSSI: ${latestPacket?.rssi || 'N/A'} dBm<br>
+        📍 Location: [${coord.lat.toFixed(4)}, ${coord.lng.toFixed(4)}]<br>
+        📦 Total Packets: ${Object.keys(nodeData.Packets || {}).length}
+      `;
+      extendedContent.appendChild(nodeExtendedDiv);
+    });
+  }
+  
+  popupContent.appendChild(extendedContent);
+  popupContent.appendChild(toggleBtn);
+  
+  // Toggle functionality
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isExtended = extendedContent.style.display === 'block';
+    
+    if (isExtended) {
+      // Collapse
+      extendedContent.style.display = 'none';
+      toggleBtn.textContent = '⬇️';
+    } else {
+      // Expand
+      extendedContent.style.display = 'block';
+      toggleBtn.textContent = '⬆️';
+    }
+  });
+}
+
+/* --- Function to find country with most nodes --- */
+function findCountryWithMostNodes(coordinates) {
+  console.log("Finding country with most nodes...");
+  
+  // Create geocoding promises for each coordinate
+  const geocodePromises = coordinates.map(coord =>
+    fetch(`https://api.maptiler.com/geocoding/${coord.lng},${coord.lat}.json?key=k0zBlTOs7WrHcJIfCohH`)
+      .then(res => res.json())
+      .catch(error => {
+        console.error("Geocoding error:", error);
+        return null;
+      })
+  );
+  
+  Promise.all(geocodePromises).then(results => {
+    const countryCount = {};
+    const countryBboxes = {};
+    
+    results.forEach((json, index) => {
+      if (!json || !json.features) {
+        console.log(`No geocoding result for coordinate ${index}`);
+        return;
+      }
+      
+      // Find the country feature
+      const countryFeature = json.features.find(f => f.place_type.includes("country"));
+      if (!countryFeature) {
+        console.log(`No country found for coordinate ${index}`);
+        return;
+      }
+      
+      const country = countryFeature.properties.name;
+      console.log(`Coordinate ${index} is in: ${country}`);
+      
+      // Count occurrences
+      countryCount[country] = (countryCount[country] || 0) + 1;
+      
+      // Store bbox for the country if we haven't yet
+      if (!countryBboxes[country] && countryFeature.bbox) {
+        countryBboxes[country] = countryFeature.bbox;
+      }
+    });
+    
+    console.log("Country counts:", countryCount);
+    
+    // Find country with most nodes
+    let maxCountry = null;
+    let maxCount = 0;
+    
+    Object.entries(countryCount).forEach(([country, count]) => {
+      if (count > maxCount) {
+        maxCount = count;
+        maxCountry = country;
+      }
+    });
+    
+    if (maxCountry) {
+      console.log(`Country with most nodes: ${maxCountry} (${maxCount} nodes)`);
+      
       const bbox = countryBboxes[maxCountry];
-
       if (bbox) {
+        console.log("Zooming to bounding box:", bbox);
+        
+        // Fit map to the country's bounding box
         map.fitBounds(
           [
             [bbox[0], bbox[1]],
             [bbox[2], bbox[3]]
           ],
-          { padding: 50, duration: 1200 }
+          {
+            padding: 50,
+            duration: 2000,
+            essential: true
+          }
         );
+      } else {
+        // If no bbox, just go to the first coordinate
+        console.log("No bounding box found, going to first coordinate");
+        const firstCoord = coordinates[0];
+        map.flyTo({
+          center: [firstCoord.lng, firstCoord.lat],
+          zoom: 10,
+          duration: 2000
+        });
       }
-    });
-  }
+    } else {
+      console.log("No country found, going to first coordinate");
+      const firstCoord = coordinates[0];
+      map.flyTo({
+        center: [firstCoord.lng, firstCoord.lat],
+        zoom: 10,
+        duration: 2000
+      });
+    }
+  }).catch(error => {
+    console.error("Error in geocoding promises:", error);
+    
+    // Fallback: just go to the first coordinate
+    if (coordinates.length > 0) {
+      const firstCoord = coordinates[0];
+      map.flyTo({
+        center: [firstCoord.lng, firstCoord.lat],
+        zoom: 10,
+        duration: 2000
+      });
+    }
+  });
 }
+
+/* --- Load initial data when map loads (ONCE, not real-time) --- */
+map.on('load', () => {
+  console.log("Map loaded, loading initial data (one-time)...");
+  loadDataOnce();
+});
+
+/* --- CSS Styling --- */
+const style = document.createElement('style');
+style.textContent = `
+  .side-popup .maplibregl-popup-content {
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    padding: 0;
+    overflow: hidden;
+  }
+  
+  .popup-container {
+    width: 500px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  
+  .popup-top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 10px 15px;
+  }
+  
+  .popup-title {
+    color: white;
+    font-weight: bold;
+    font-size: 16px;
+    letter-spacing: 1px;
+  }
+  
+  .popup-refresh-btn {
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    color: white;
+    font-size: 18px;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s ease;
+  }
+  
+  .popup-refresh-btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: scale(1.1);
+  }
+  
+  .popup-refresh-btn:focus {
+    outline: none;
+  }
+  
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+  
+  .popup-main-content {
+    display: flex;
+    padding: 15px;
+    gap: 15px;
+    border-bottom: 1px solid #eee;
+  }
+  
+  .popup-left, .popup-right {
+    flex: 1;
+  }
+  
+  .section-header {
+    font-weight: bold;
+    color: #666;
+    font-size: 12px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  
+  .raw-content, .timestamps-content {
+    font-size: 11px;
+  }
+  
+  .node-raw-item {
+    margin-bottom: 8px;
+    padding: 5px;
+    background: #f8f9fa;
+    border-radius: 4px;
+  }
+  
+  .raw-message {
+    color: #2c3e50;
+    word-break: break-word;
+  }
+  
+  .node-time-item {
+    margin-bottom: 10px;
+    padding: 8px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    font-size: 10px;
+    line-height: 1.6;
+  }
+  
+  .node-time-item.no-data {
+    color: #999;
+    font-style: italic;
+  }
+  
+  .timestamp-receive {
+    color: #27ae60;
+    display: block;
+  }
+  
+  .timestamp-upload {
+    color: #e67e22;
+    display: block;
+  }
+  
+  .popup-extended {
+    padding: 15px;
+    background: #f1f8ff;
+    border-top: 2px dashed #667eea;
+    font-size: 11px;
+  }
+  
+  .node-extended-item {
+    margin-bottom: 10px;
+    padding: 8px;
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+  
+  .popup-toggle-btn {
+    width: 100%;
+    padding: 12px;
+    background: white;
+    border: none;
+    border-top: 1px solid #eee;
+    cursor: pointer;
+    font-size: 18px;
+    transition: all 0.3s ease;
+  }
+  
+  .popup-toggle-btn:hover {
+    background: #f8f9fa;
+  }
+  
+  .popup-toggle-btn:focus {
+    outline: none;
+  }
+`;
+document.head.appendChild(style);
